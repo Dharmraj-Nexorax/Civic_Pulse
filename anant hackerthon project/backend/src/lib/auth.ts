@@ -78,8 +78,14 @@ export async function verifyAuthToken(token: string): Promise<JWTPayload | null>
 }
 
 export function normalizeMobile(mobile: string | null | undefined): string | null {
+  // Accept various user inputs (e.g., '+91 9876543210', '987-654-3210')
+  // Strip all non‑digit characters first.
   if (!mobile) return null;
-  const digits = mobile.replace(/[^\d]/g, '');
+  let digits = mobile.replace(/[^\d]/g, '');
+  // If the number includes a country code (often longer than 10 digits), keep only the last 10 digits.
+  if (digits.length > 10) {
+    digits = digits.slice(-10);
+  }
   if (digits.length < 7 || digits.length > 15) {
     return null;
   }

@@ -78,7 +78,7 @@ async function runSmokeTest() {
           {
             originalName: 'smoke_proof.png',
             mime: 'image/png',
-            sizeBytes: 1024,
+            sizeBytes: 1024, // Keep existing buffer value
             buffer: Buffer.from(
               'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
               'base64'
