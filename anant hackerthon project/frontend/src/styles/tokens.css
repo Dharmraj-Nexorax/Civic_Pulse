@@ -1,0 +1,17 @@
+/* CivicPulse Design Tokens — strict monochrome grayscale */
+:root {
+  --background: #ffffff;
+  --surface: #f7f7f7;
+  --surface-light: #f0f0f0;
+  --section-gray: #ececec;
+  --border: #e0e0e0;
+  --muted: #a0a09f;
+  --text: #110d0c;
+  --black: #000000;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.08);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.10);
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+}

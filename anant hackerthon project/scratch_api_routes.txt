@@ -1,0 +1,1498 @@
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\admin\alerts\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireRole } from '@/lib/auth';
+import { query } from '@/lib/db';
+import { generateAlerts } from '@/domain/alerts';
+import { errorResponse, okResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(req: NextRequest) {
+  try {
+    const user = await requireRole(req, ['ADMIN']);
+    const { rows: issues } = await query(
+      `SELECT id, title, status, priority_band, priority_override_band, created_at, assigned_at
+       FROM issues
+       WHERE organization_id = $1 AND status NOT IN ('CITIZEN_VERIFIED', 'DUPLICATE')`,
+      [user.organization_id]
+    );
+
+    const { rows: workers } = await query(
+      `SELECT u.id, u.full_name,
+              (SELECT COUNT(*) FROM issues i WHERE i.assigned_worker_id = u.id AND i.status IN ('ASSIGNED', 'IN_PROGRESS', 'REOPENED')) as active_issues
+       FROM users u
+       WHERE u.organization_id = $1 AND u.role = 'WORKER'`,
+      [user.organization_id]
+    );
+
+    const alerts = generateAlerts({
+      issues: issues.map(i => ({
+        id: i.id,
+        title: i.title,
+        status: i.status,
+        effectiveBand: i.priority_override_band || i.priority_band,
+        createdAt: new Date(i.created_at),
+        assignedAt: i.assigned_at ? new Date(i.assigned_at) : null,
+      })),
+      workers: workers.map(w => ({
+        id: w.id,
+        name: w.full_name,
+        activeIssuesCount: parseInt(w.active_issues, 10) || 0,
+      })),
+    });
+
+    return okResponse({ alerts });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\admin\analytics\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireRole } from '@/lib/auth';
+import { computeOrganizationMetrics } from '@/services/metricsService';
+import { errorResponse, okResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(req: NextRequest) {
+  try {
+    const user = await requireRole(req, ['ADMIN']);
+    const daysParam = parseInt(req.nextUrl.searchParams.get('days') || '90', 10);
+    const days = isNaN(daysParam) ? 90 : daysParam;
+    const metrics = await computeOrganizationMetrics(user.organization_id, days);
+    return okResponse({ metrics });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\admin\hotspots\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireRole } from '@/lib/auth';
+import { query } from '@/lib/db';
+import { computeWardHotspots } from '@/domain/hotspots';
+import { errorResponse, okResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(req: NextRequest) {
+  try {
+    const user = await requireRole(req, ['ADMIN']);
+    const { rows } = await query(
+      `SELECT w.id as ward_id, w.name as ward_name, w.center_lat, w.center_lng,
+              COUNT(DISTINCT i.id) as issue_count,
+              COUNT(c.id) as report_count
+       FROM wards w
+       LEFT JOIN issues i ON i.ward_id = w.id AND i.organization_id = $1 AND i.status NOT IN ('CITIZEN_VERIFIED', 'DUPLICATE')
+       LEFT JOIN complaints c ON c.issue_id = i.id
+       WHERE w.organization_id = $1
+       GROUP BY w.id, w.name, w.center_lat, w.center_lng`,
+      [user.organization_id]
+    );
+
+    const inputs = rows.map(r => ({
+      ward_id: r.ward_id,
+      ward_name: r.ward_name,
+      lat: r.center_lat || 0,
+      lng: r.center_lng || 0,
+      issue_count: parseInt(r.issue_count, 10) || 0,
+      report_count: parseInt(r.report_count, 10) || 0,
+      top_category_name: null,
+    }));
+
+    const result = computeWardHotspots(inputs);
+
+    return okResponse({ hotspots: result.adminItems, insight: result.insight });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\admin\issues\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireRole } from '@/lib/auth';
+import { query } from '@/lib/db';
+import { errorResponse, okResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(req: NextRequest) {
+  try {
+    const user = await requireRole(req, ['ADMIN']);
+    const { searchParams } = new URL(req.url);
+    const status = searchParams.get('status');
+
+    let sql = `
+      SELECT i.id, i.title, i.status, i.priority_band, i.priority_score,
+             i.priority_override_band, i.created_at, cat.name as category_name,
+             w.name as ward_name,
+             (SELECT COUNT(*) FROM complaints c WHERE c.issue_id = i.id) as complaint_count
+      FROM issues i
+      JOIN categories cat ON cat.id = i.category_id
+      JOIN wards w ON w.id = i.ward_id
+      WHERE i.organization_id = $1
+    `;
+    const params: any[] = [user.organization_id];
+
+    if (status) {
+      params.push(status);
+      sql += ` AND i.status = $2`;
+    }
+
+    sql += ` ORDER BY i.priority_score DESC, i.created_at DESC`;
+
+    const { rows } = await query(sql, params);
+
+    return okResponse({ issues: rows });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\admin\issues\[id]\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireRole } from '@/lib/auth';
+import { query } from '@/lib/db';
+import { errorResponse, okResponse } from '@/lib/http';
+import { notFound, validationError } from '@/lib/errors';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const user = await requireRole(req, ['ADMIN']);
+    const { rows } = await query(
+      `SELECT i.*, cat.name as category_name, w.name as ward_name,
+              u.full_name as assigned_worker_name, t.name as assigned_team_name
+       FROM issues i
+       JOIN categories cat ON cat.id = i.category_id
+       JOIN wards w ON w.id = i.ward_id
+       LEFT JOIN users u ON u.id = i.assigned_worker_id
+       LEFT JOIN teams t ON t.id = i.assigned_team_id
+       WHERE i.id = $1 AND i.organization_id = $2`,
+      [params.id, user.organization_id]
+    );
+
+    if (rows.length === 0) {
+      throw notFound('Issue not found.');
+    }
+
+    return okResponse({ issue: rows[0] });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const user = await requireRole(req, ['ADMIN']);
+    const body = await req.json();
+    const { priority_override_band, priority_override_reason } = body;
+
+    if (!priority_override_band || !priority_override_reason) {
+      throw validationError('Both priority_override_band and priority_override_reason are required.');
+    }
+
+    await query(
+      `UPDATE issues
+       SET priority_override_band = $1, priority_override_reason = $2,
+           priority_overridden_by = $3, priority_overridden_at = now(), updated_at = now()
+       WHERE id = $4 AND organization_id = $5`,
+      [priority_override_band, priority_override_reason, user.id, params.id, user.organization_id]
+    );
+
+    return okResponse({ message: 'Priority override updated' });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\admin\issues\[id]\assign\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireRole } from '@/lib/auth';
+import { withTransaction } from '@/lib/db';
+import { assignIssue } from '@/services/assignmentService';
+import { errorResponse, okResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const user = await requireRole(req, ['ADMIN']);
+    const body = await req.json();
+    const { worker_id, team_id, reassign_reason } = body;
+
+    await withTransaction(async (client) => {
+      await assignIssue(client, {
+        issueId: params.id,
+        teamId: team_id,
+        workerId: worker_id,
+        adminId: user.id,
+        orgId: user.organization_id,
+        reassignReason: reassign_reason,
+      });
+    });
+
+    return okResponse({ message: 'Worker assigned successfully' });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\admin\teams\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireRole } from '@/lib/auth';
+import { query } from '@/lib/db';
+import { errorResponse, okResponse } from '@/lib/http';
+import { validationError } from '@/lib/errors';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(req: NextRequest) {
+  try {
+    const user = await requireRole(req, ['ADMIN']);
+    const { rows } = await query(
+      `SELECT id, name, is_active
+       FROM teams
+       WHERE organization_id = $1
+       ORDER BY name ASC`,
+      [user.organization_id]
+    );
+
+    const teams = rows.map((r) => ({
+      ...r,
+      description: '',
+    }));
+
+    return okResponse({ teams });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const user = await requireRole(req, ['ADMIN']);
+    const body = await req.json();
+    const { name } = body;
+
+    if (!name || name.trim().length === 0) {
+      throw validationError('Team name is required.');
+    }
+
+    const { rows } = await query(
+      `INSERT INTO teams (organization_id, name)
+       VALUES ($1, $2)
+       RETURNING id, name, is_active`,
+      [user.organization_id, name.trim()]
+    );
+
+    return okResponse({ team: { ...rows[0], description: '' } }, 201);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\admin\workers\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireRole, hashPassword, normalizeMobile } from '@/lib/auth';
+import { query } from '@/lib/db';
+import { errorResponse, okResponse } from '@/lib/http';
+import { validationError } from '@/lib/errors';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(req: NextRequest) {
+  try {
+    const user = await requireRole(req, ['ADMIN']);
+    const { rows } = await query(
+      `SELECT u.id, u.full_name, u.mobile, u.email, u.is_active, u.team_id,
+              t.name as team_name,
+              (SELECT COUNT(*) FROM issues i WHERE i.assigned_worker_id = u.id AND i.status IN ('ASSIGNED', 'IN_PROGRESS', 'REOPENED')) as active_count
+       FROM users u
+       LEFT JOIN teams t ON t.id = u.team_id
+       WHERE u.organization_id = $1 AND u.role = 'WORKER'
+       ORDER BY u.full_name ASC`,
+      [user.organization_id]
+    );
+
+    return okResponse({ workers: rows });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const user = await requireRole(req, ['ADMIN']);
+    const body = await req.json();
+    const { full_name, mobile, email, password, team_id } = body;
+
+    if (!full_name || full_name.trim().length === 0) {
+      throw validationError('Full name is required.');
+    }
+    if (!team_id) {
+      throw validationError('Worker must be assigned to a team.');
+    }
+
+    const { rows: teamRows } = await query(
+      `SELECT id FROM teams WHERE id = $1 AND organization_id = $2 AND is_active = true`,
+      [team_id, user.organization_id]
+    );
+    if (teamRows.length === 0) {
+      throw validationError('Selected active team not found.');
+    }
+
+    const normMobile = normalizeMobile(mobile);
+    if (!normMobile) {
+      throw validationError('Valid mobile number is required.');
+    }
+    if (!password || password.length < 8) {
+      throw validationError('Password must be at least 8 characters.');
+    }
+
+    const passwordHash = await hashPassword(password);
+
+    const { rows } = await query(
+      `INSERT INTO users (organization_id, role, full_name, mobile, email, password_hash, team_id)
+       VALUES ($1, 'WORKER', $2, $3, $4, $5, $6)
+       RETURNING id, full_name, mobile, email, team_id`,
+      [user.organization_id, full_name.trim(), normMobile, email || null, passwordHash, team_id]
+    );
+
+    return okResponse({ worker: rows[0] }, 201);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\auth\login\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { z } from 'zod';
+import { query } from '@/lib/db';
+import { config } from '@/lib/config';
+import { verifyPassword, createAuthToken, normalizeMobile, AuthUser } from '@/lib/auth';
+import { okResponse, errorResponse } from '@/lib/http';
+import { unauthenticated } from '@/lib/errors';
+
+export const dynamic = 'force-dynamic';
+
+const LoginSchema = z.object({
+  identifier: z.string().min(1, 'Identifier is required'),
+  password: z.string().min(1, 'Password is required'),
+  remember: z.boolean().optional(),
+});
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const data = LoginSchema.parse(body);
+
+    const normMobile = normalizeMobile(data.identifier);
+    const normEmail = data.identifier.trim().toLowerCase();
+
+    // Query user by mobile or email
+    const { rows: users } = await query<AuthUser & { password_hash: string }>(
+      `SELECT u.id, u.organization_id, u.role, u.full_name, u.mobile, u.email,
+              u.ward_id, u.team_id, u.password_hash, u.is_active
+       FROM users u
+       WHERE (u.mobile = $1 OR u.email = $2) AND u.is_active = true`,
+      [normMobile, normEmail]
+    );
+
+    if (users.length === 0) {
+      throw unauthenticated('Invalid credentials.');
+    }
+
+    const user = users[0];
+    const passwordValid = await verifyPassword(data.password, user.password_hash);
+    if (!passwordValid) {
+      throw unauthenticated('Invalid credentials.');
+    }
+
+    const authUser: AuthUser = {
+      id: user.id,
+      organization_id: user.organization_id,
+      role: user.role,
+      full_name: user.full_name,
+      mobile: user.mobile,
+      email: user.email,
+      ward_id: user.ward_id,
+      team_id: user.team_id,
+    };
+
+    const token = await createAuthToken(authUser, !!data.remember);
+
+    const res = okResponse({ user: authUser });
+    const cookieOptions: any = {
+      name: config.cookieName,
+      value: token,
+      httpOnly: true,
+      sameSite: 'lax',
+      path: '/',
+      secure: process.env.NODE_ENV === 'production',
+    };
+
+    if (data.remember) {
+      cookieOptions.maxAge = config.cookieMaxAgeSeconds;
+    }
+
+    res.cookies.set(cookieOptions);
+    return res;
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\auth\logout\route.ts
+=================================================
+import { NextResponse } from 'next/server';
+import { config } from '@/lib/config';
+
+export const dynamic = 'force-dynamic';
+
+export async function POST() {
+  const res = new NextResponse(null, { status: 204 });
+  res.cookies.set({
+    name: config.cookieName,
+    value: '',
+    httpOnly: true,
+    sameSite: 'lax',
+    path: '/',
+    maxAge: 0,
+  });
+  return res;
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\auth\me\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireAuth } from '@/lib/auth';
+import { query } from '@/lib/db';
+import { okResponse, errorResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(req: NextRequest) {
+  try {
+    const user = await requireAuth(req);
+
+    const { rows: userRows } = await query<{
+      id: string;
+      role: any;
+      full_name: string;
+      mobile: string | null;
+      email: string | null;
+      ward_id: string | null;
+      ward_name: string | null;
+      team_id: string | null;
+      team_name: string | null;
+    }>(
+      `SELECT u.id, u.role, u.full_name, u.mobile, u.email,
+              u.ward_id, w.name as ward_name,
+              u.team_id, t.name as team_name
+       FROM users u
+       LEFT JOIN wards w ON w.id = u.ward_id
+       LEFT JOIN teams t ON t.id = u.team_id
+       WHERE u.id = $1`,
+      [user.id]
+    );
+
+    if (userRows.length === 0) {
+      return okResponse({ user: null });
+    }
+
+    const u = userRows[0];
+    return okResponse({
+      user: {
+        id: u.id,
+        role: u.role,
+        full_name: u.full_name,
+        mobile: u.mobile,
+        email: u.email,
+        ward: u.ward_id ? { id: u.ward_id, name: u.ward_name } : null,
+        team: u.team_id ? { id: u.team_id, name: u.team_name } : null,
+      },
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\auth\register\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { z } from 'zod';
+import { query } from '@/lib/db';
+import { config } from '@/lib/config';
+import { hashPassword, createAuthToken, normalizeMobile, AuthUser } from '@/lib/auth';
+import { okResponse, errorResponse } from '@/lib/http';
+import { conflict, validationError } from '@/lib/errors';
+
+export const dynamic = 'force-dynamic';
+
+const RegisterSchema = z.object({
+  full_name: z.string().min(2, 'Name must be at least 2 characters'),
+  mobile: z.string().min(7, 'Mobile must be at least 7 digits'),
+  email: z.string().email().optional().or(z.literal('')),
+  password: z.string().min(8, 'Password must be at least 8 characters'),
+  ward_id: z.string().uuid('Valid ward is required'),
+});
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const data = RegisterSchema.parse(body);
+
+    const normMobile = normalizeMobile(data.mobile);
+    if (!normMobile) {
+      throw validationError('Invalid mobile number format.');
+    }
+    const normEmail = data.email && data.email.trim() ? data.email.trim().toLowerCase() : null;
+
+    // Get default org
+    const { rows: orgRows } = await query<{ id: string }>(
+      'SELECT id FROM organizations WHERE slug = $1',
+      [config.defaultOrgSlug]
+    );
+    if (orgRows.length === 0) {
+      throw validationError('Default organization not configured.');
+    }
+    const orgId = orgRows[0].id;
+
+    // Check ward
+    const { rows: wardRows } = await query(
+      'SELECT id FROM wards WHERE id = $1 AND organization_id = $2',
+      [data.ward_id, orgId]
+    );
+    if (wardRows.length === 0) {
+      throw validationError('Selected ward does not exist.');
+    }
+
+    // Check uniqueness
+    const { rows: existing } = await query(
+      `SELECT id, mobile, email FROM users
+       WHERE organization_id = $1 AND (
+         mobile = $2 OR ($3::text IS NOT NULL AND email = $3)
+       )`,
+      [orgId, normMobile, normEmail]
+    );
+
+    if (existing.length > 0) {
+      throw conflict('A user with this mobile number or email already exists.');
+    }
+
+    const pwdHash = await hashPassword(data.password);
+
+    const { rows: userRows } = await query<AuthUser>(
+      `INSERT INTO users (
+         organization_id, role, full_name, mobile, email, password_hash, ward_id, is_active
+       ) VALUES ($1, 'CITIZEN', $2, $3, $4, $5, $6, true)
+       RETURNING id, organization_id, role, full_name, mobile, email, ward_id, team_id`,
+      [orgId, data.full_name.trim(), normMobile, normEmail, pwdHash, data.ward_id]
+    );
+
+    const newUser = userRows[0];
+    const token = await createAuthToken(newUser, false);
+
+    const res = okResponse({ user: newUser }, 201);
+    res.cookies.set({
+      name: config.cookieName,
+      value: token,
+      httpOnly: true,
+      sameSite: 'lax',
+      path: '/',
+      secure: process.env.NODE_ENV === 'production',
+    });
+
+    return res;
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\citizen\ai\assist\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { z } from 'zod';
+import { requireRole } from '@/lib/auth';
+import { query } from '@/lib/db';
+import { aiCategorize } from '@/integrations/aiClient';
+import { categorizeByKeywords } from '@/domain/keywordCategorizer';
+import { generateFallbackAssist } from '@/domain/templates';
+import { okResponse, errorResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+const AssistSchema = z.object({
+  description: z.string().min(1, 'Description is required'),
+});
+
+export async function POST(req: NextRequest) {
+  try {
+    const user = await requireRole(req, ['CITIZEN']);
+    const body = await req.json();
+    const { description } = AssistSchema.parse(body);
+
+    const { rows: categories } = await query<{
+      id: string;
+      key: string;
+      name: string;
+      keywords: string[];
+    }>(
+      'SELECT id, key, name, keywords FROM categories WHERE organization_id = $1 AND is_active = true',
+      [user.organization_id]
+    );
+
+    // Try AI service first
+    const aiResult = await aiCategorize(
+      description,
+      categories.map((c) => ({ key: c.key, name: c.name, keywords: c.keywords }))
+    );
+
+    if (aiResult && aiResult.ai_available) {
+      const matchedCat = categories.find((c) => c.key === aiResult.category_key);
+      return okResponse({
+        ai_available: true,
+        method: aiResult.method,
+        category_key: aiResult.category_key,
+        category_id: matchedCat ? matchedCat.id : null,
+        confidence: aiResult.confidence,
+        suggested_title: aiResult.suggested_title ?? `Issue — ${matchedCat?.name ?? 'Report'}`,
+        cleaned_description: aiResult.cleaned_description ?? description.trim(),
+        missing_info: aiResult.missing_info ?? [],
+      });
+    }
+
+    // Deterministic fallback: keyword categorizer + template
+    const kwResult = categorizeByKeywords(description, categories);
+    const matchedCat = categories.find((c) => c.id === kwResult.categoryId);
+    const tmpl = generateFallbackAssist(description, matchedCat?.name, null);
+
+    return okResponse({
+      ai_available: false,
+      method: 'keyword',
+      category_key: kwResult.categoryKey,
+      category_id: kwResult.categoryId,
+      confidence: null,
+      suggested_title: tmpl.suggestedTitle,
+      cleaned_description: tmpl.cleanedDescription,
+      missing_info: tmpl.missingInfo,
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\citizen\complaints\route.ts
+=================================================
+import { NextRequest, NextResponse } from 'next/server';
+import { requireRole } from '@/lib/auth';
+import { query, withTransaction } from '@/lib/db';
+import { submitComplaint } from '@/services/complaintService';
+import { errorResponse, okResponse } from '@/lib/http';
+import { parseAndValidateUploads } from '@/lib/uploads';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(req: NextRequest) {
+  try {
+    const user = await requireRole(req, ['CITIZEN']);
+    const { rows } = await query(
+      `SELECT c.id as complaint_id, c.complaint_no, c.issue_id, c.description, c.created_at,
+              i.title, i.status, cat.name as category_name, w.name as ward_name,
+              i.priority_override_band, i.priority_band
+       FROM complaints c
+       JOIN issues i ON i.id = c.issue_id
+       JOIN categories cat ON cat.id = i.category_id
+       JOIN wards w ON w.id = i.ward_id
+       WHERE c.citizen_id = $1 AND c.organization_id = $2
+       ORDER BY c.created_at DESC`,
+      [user.id, user.organization_id]
+    );
+
+    const complaints = rows.map(r => ({
+      complaint_id: r.complaint_id,
+      complaint_no: r.complaint_no,
+      issue_id: r.issue_id,
+      title: r.title,
+      description: r.description,
+      status: r.status,
+      status_label: r.status.replace(/_/g, ' '),
+      created_at: r.created_at,
+      category_name: r.category_name,
+      ward_name: r.ward_name,
+      priority_band: r.priority_override_band || r.priority_band,
+    }));
+
+    return okResponse({ complaints });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const user = await requireRole(req, ['CITIZEN']);
+    const formData = await req.formData();
+    const description = formData.get('description') as string;
+    const categoryId = formData.get('category_id') as string;
+    const wardId = formData.get('ward_id') as string;
+    const lat = parseFloat(formData.get('lat') as string);
+    const lng = parseFloat(formData.get('lng') as string);
+    const address = (formData.get('address') as string) || null;
+    const city = (formData.get('city') as string) || null;
+    const district = (formData.get('district') as string) || null;
+    const state = (formData.get('state') as string) || null;
+    const country = (formData.get('country') as string) || null;
+    const postalCode = (formData.get('postal_code') as string) || null;
+    const locationMethod = ((formData.get('location_method') as string) || 'MANUAL') as 'GPS' | 'MANUAL';
+    const rawFiles = formData.getAll('media') as File[];
+
+    const validatedFiles = await parseAndValidateUploads(rawFiles);
+
+    const result = await withTransaction(async (client) => {
+      return await submitComplaint(client, {
+        organizationId: user.organization_id,
+        citizenId: user.id,
+        categoryId,
+        wardId,
+        description,
+        lat,
+        lng,
+        address,
+        city,
+        district,
+        state,
+        country,
+        postalCode,
+        locationMethod,
+        files: validatedFiles,
+      });
+    });
+
+    return okResponse(result, 201);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\citizen\complaints\[id]\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireRole } from '@/lib/auth';
+import { query, getPool } from '@/lib/db';
+import { getCitizenIssueView } from '@/services/issueService';
+import { errorResponse, okResponse } from '@/lib/http';
+import { notFound } from '@/lib/errors';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const user = await requireRole(req, ['CITIZEN']);
+    const { rows: compRows } = await query(
+      `SELECT id, citizen_id FROM complaints WHERE id = $1 AND organization_id = $2`,
+      [params.id, user.organization_id]
+    );
+
+    if (compRows.length === 0) {
+      throw notFound('Complaint not found.');
+    }
+
+    const { citizen_id } = compRows[0];
+    const pool = getPool();
+    const client = await pool.connect();
+    try {
+      const view = await getCitizenIssueView(client, params.id, citizen_id);
+      return okResponse(view);
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\citizen\complaints\[id]\verify\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireRole } from '@/lib/auth';
+import { query, withTransaction } from '@/lib/db';
+import { verifyResolution } from '@/services/resolutionService';
+import { errorResponse, okResponse } from '@/lib/http';
+import { notFound, validationError } from '@/lib/errors';
+
+export const dynamic = 'force-dynamic';
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const user = await requireRole(req, ['CITIZEN']);
+    const body = await req.json();
+    const { decision, reject_reason, stars } = body;
+
+    if (decision !== 'VERIFIED' && decision !== 'REJECTED') {
+      throw validationError('Decision must be VERIFIED or REJECTED');
+    }
+
+    const { rows: compRows } = await query(
+      `SELECT issue_id FROM complaints WHERE id = $1 AND organization_id = $2`,
+      [params.id, user.organization_id]
+    );
+
+    if (compRows.length === 0) {
+      throw notFound('Complaint not found.');
+    }
+
+    const issueId = compRows[0].issue_id;
+
+    const result = await withTransaction(async (client) => {
+      return await verifyResolution(client, {
+        issueId,
+        complaintId: params.id,
+        citizenId: user.id,
+        decision,
+        rejectReason: reject_reason,
+        stars: typeof stars === 'number' ? stars : undefined,
+      });
+    });
+
+    return okResponse(result);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\citizen\issues\nearby\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireRole } from '@/lib/auth';
+import { query } from '@/lib/db';
+import { haversineDistanceMeters, MANDSAUR_CONFIG } from '@/lib/geo';
+import { errorResponse, okResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(req: NextRequest) {
+  try {
+    const user = await requireRole(req, ['CITIZEN']);
+    const { searchParams } = new URL(req.url);
+    let lat = parseFloat(searchParams.get('lat') || '');
+    let lng = parseFloat(searchParams.get('lng') || '');
+    const radiusMeters = parseFloat(searchParams.get('radius') || '5000');
+
+    if (isNaN(lat) || isNaN(lng) || (lat === 0 && lng === 0)) {
+      lat = MANDSAUR_CONFIG.centerLat;
+      lng = MANDSAUR_CONFIG.centerLng;
+    }
+
+    const { rows } = await query(
+      `SELECT i.id as issue_id, i.lat, i.lng, i.status, cat.name as category_name, w.name as ward_name
+       FROM issues i
+       JOIN categories cat ON cat.id = i.category_id
+       JOIN wards w ON w.id = i.ward_id
+       WHERE i.organization_id = $1 AND i.status <> 'CITIZEN_VERIFIED' AND i.merged_into_issue_id IS NULL`,
+      [user.organization_id]
+    );
+
+    const issues = rows
+      .map(r => {
+        const dist = haversineDistanceMeters(lat, lng, r.lat, r.lng);
+        return {
+          issue_id: r.issue_id,
+          category_name: r.category_name,
+          ward_name: r.ward_name,
+          status: r.status,
+          status_label: r.status.replace(/_/g, ' '),
+          distance_m: dist,
+        };
+      })
+      .filter(r => r.distance_m <= radiusMeters)
+      .sort((a, b) => a.distance_m - b.distance_m);
+
+    return okResponse({ issues });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\health\route.ts
+=================================================
+import { NextResponse } from 'next/server';
+
+export async function GET() {
+  return NextResponse.json({ status: 'ok', service: 'civicpulse-backend' });
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\media\[id]\route.ts
+=================================================
+import { NextRequest, NextResponse } from 'next/server';
+import fs from 'fs';
+import path from 'path';
+import { requireAuth } from '@/lib/auth';
+import { query } from '@/lib/db';
+import { config } from '@/lib/config';
+import { notFound, forbidden } from '@/lib/errors';
+import { errorResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const user = await requireAuth(req);
+
+    const { rows: mediaRows } = await query<{
+      id: string;
+      organization_id: string;
+      storage_path: string;
+      mime: string;
+      issue_id: string | null;
+      complaint_id: string | null;
+    }>('SELECT id, organization_id, storage_path, mime, issue_id, complaint_id FROM media WHERE id = $1', [
+      params.id,
+    ]);
+
+    if (mediaRows.length === 0) {
+      throw notFound('Media file not found.');
+    }
+    const media = mediaRows[0];
+
+    // Authorization check
+    if (user.role !== 'ADMIN') {
+      if (user.role === 'WORKER') {
+        const { rows: assignRows } = await query(
+          'SELECT id FROM assignments WHERE issue_id = $1 AND worker_id = $2',
+          [media.issue_id, user.id]
+        );
+        if (assignRows.length === 0) {
+          throw forbidden('Access denied to this media file.');
+        }
+      } else if (user.role === 'CITIZEN') {
+        const { rows: compRows } = await query(
+          'SELECT id FROM complaints WHERE (id = $1 OR issue_id = $2) AND citizen_id = $3',
+          [media.complaint_id, media.issue_id, user.id]
+        );
+        if (compRows.length === 0) {
+          throw forbidden('Access denied to this media file.');
+        }
+      }
+    }
+
+    const filePath = path.resolve(config.uploadDir, media.storage_path);
+    if (!fs.existsSync(filePath)) {
+      throw notFound('File not found on storage.');
+    }
+
+    const fileBuffer = await fs.promises.readFile(filePath);
+
+    return new NextResponse(fileBuffer, {
+      headers: {
+        'Content-Type': media.mime,
+        'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'private, max-age=86400',
+      },
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\notifications\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireAuth } from '@/lib/auth';
+import { query } from '@/lib/db';
+import { okResponse, errorResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(req: NextRequest) {
+  try {
+    const user = await requireAuth(req);
+    const unreadOnly = req.nextUrl.searchParams.get('unread_only') === 'true';
+
+    const whereClause = unreadOnly
+      ? 'WHERE user_id = $1 AND is_read = false'
+      : 'WHERE user_id = $1';
+
+    const { rows: items } = await query<{
+      id: string;
+      type: string;
+      message: string;
+      issue_id: string | null;
+      is_read: boolean;
+      created_at: Date;
+    }>(
+      `SELECT id, type, message, issue_id, is_read, created_at
+       FROM notifications
+       ${whereClause}
+       ORDER BY created_at DESC LIMIT 50`,
+      [user.id]
+    );
+
+    const { rows: countRows } = await query<{ count: string }>(
+      'SELECT COUNT(*) as count FROM notifications WHERE user_id = $1 AND is_read = false',
+      [user.id]
+    );
+    const unreadCount = parseInt(countRows[0].count, 10);
+
+    return okResponse({
+      items: items.map((i) => ({
+        id: i.id,
+        type: i.type,
+        message: i.message,
+        issue_id: i.issue_id,
+        is_read: i.is_read,
+        created_at: i.created_at.toISOString(),
+      })),
+      unread_count: unreadCount,
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\notifications\read-all\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireAuth } from '@/lib/auth';
+import { query } from '@/lib/db';
+import { noContentResponse, errorResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function POST(req: NextRequest) {
+  try {
+    const user = await requireAuth(req);
+    await query('UPDATE notifications SET is_read = true WHERE user_id = $1', [user.id]);
+    return noContentResponse();
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\notifications\[id]\read\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireAuth } from '@/lib/auth';
+import { query } from '@/lib/db';
+import { noContentResponse, errorResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const user = await requireAuth(req);
+    await query(
+      'UPDATE notifications SET is_read = true WHERE id = $1 AND user_id = $2',
+      [params.id, user.id]
+    );
+    return noContentResponse();
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\public\categories\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { query } from '@/lib/db';
+import { config } from '@/lib/config';
+import { okResponse, errorResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(req: NextRequest) {
+  try {
+    const { rows: orgRows } = await query<{ id: string }>(
+      'SELECT id FROM organizations WHERE slug = $1',
+      [config.defaultOrgSlug]
+    );
+
+    if (orgRows.length === 0) {
+      return okResponse([]);
+    }
+
+    const { rows: categories } = await query<{ id: string; key: string; name: string }>(
+      'SELECT id, key, name FROM categories WHERE organization_id = $1 AND is_active = true ORDER BY name ASC',
+      [orgRows[0].id]
+    );
+
+    return okResponse(categories);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\public\hotspots\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { query } from '@/lib/db';
+import { config } from '@/lib/config';
+import { computeHotspots } from '@/domain/hotspots';
+import { okResponse, errorResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(req: NextRequest) {
+  try {
+    const { rows: orgRows } = await query<{ id: string }>(
+      'SELECT id FROM organizations WHERE slug = $1',
+      [config.defaultOrgSlug]
+    );
+
+    if (orgRows.length === 0) {
+      return okResponse({ days: 90, items: [], insight: ['No data available.'] });
+    }
+    const orgId = orgRows[0].id;
+
+    const daysParam = parseInt(req.nextUrl.searchParams.get('days') || '90', 10);
+    const days = isNaN(daysParam) ? 90 : daysParam;
+    const categoryKey = req.nextUrl.searchParams.get('category_key');
+
+    let categoryFilter = '';
+    const params: any[] = [orgId, days];
+    if (categoryKey) {
+      params.push(categoryKey);
+      categoryFilter = 'AND cat.key = $3';
+    }
+
+    const { rows: wardStats } = await query<{
+      ward_id: string;
+      ward_name: string;
+      center_lat: number;
+      center_lng: number;
+      issue_count: string;
+      report_count: string;
+      top_category_name: string | null;
+    }>(
+      `SELECT w.id as ward_id, w.name as ward_name, w.center_lat, w.center_lng,
+              COUNT(DISTINCT i.id) as issue_count,
+              COUNT(c.id) as report_count,
+              (
+                SELECT cat2.name
+                FROM issues i2
+                JOIN categories cat2 ON cat2.id = i2.category_id
+                WHERE i2.ward_id = w.id
+                  AND i2.organization_id = $1
+                  AND i2.merged_into_issue_id IS NULL
+                  AND i2.created_at >= now() - ($2 || ' days')::interval
+                GROUP BY cat2.name
+                ORDER BY COUNT(*) DESC
+                LIMIT 1
+              ) as top_category_name
+       FROM wards w
+       LEFT JOIN issues i ON i.ward_id = w.id
+                         AND i.organization_id = $1
+                         AND i.merged_into_issue_id IS NULL
+                         AND i.created_at >= now() - ($2 || ' days')::interval
+       LEFT JOIN categories cat ON cat.id = i.category_id ${categoryFilter}
+       LEFT JOIN complaints c ON c.issue_id = i.id
+       WHERE w.organization_id = $1
+       GROUP BY w.id, w.name, w.center_lat, w.center_lng`,
+      params
+    );
+
+    const aggregates = wardStats.map((w) => ({
+      ward_id: w.ward_id,
+      ward_name: w.ward_name,
+      lat: w.center_lat,
+      lng: w.center_lng,
+      issue_count: parseInt(w.issue_count, 10),
+      report_count: parseInt(w.report_count, 10),
+      top_category_name: w.top_category_name,
+    }));
+
+    const result = computeHotspots(aggregates, days);
+
+    return okResponse({
+      days,
+      items: result.publicItems,
+      insight: result.insight,
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\public\stats\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { query } from '@/lib/db';
+import { config } from '@/lib/config';
+import { okResponse, errorResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(req: NextRequest) {
+  try {
+    const { rows: orgRows } = await query<{ id: string }>(
+      'SELECT id FROM organizations WHERE slug = $1',
+      [config.defaultOrgSlug]
+    );
+
+    if (orgRows.length === 0) {
+      return okResponse({
+        trackable_issues: 0,
+        community_reports: 0,
+        verified_resolutions: 0,
+        active_wards: 0,
+        includes_demo_data: false,
+      });
+    }
+    const orgId = orgRows[0].id;
+
+    const { rows: stats } = await query<{
+      trackable_issues: string;
+      community_reports: string;
+      verified_resolutions: string;
+      active_wards: string;
+      demo_count: string;
+    }>(
+      `SELECT
+         (SELECT COUNT(*) FROM issues WHERE organization_id = $1 AND merged_into_issue_id IS NULL) as trackable_issues,
+         (SELECT COUNT(*) FROM complaints WHERE organization_id = $1) as community_reports,
+         (SELECT COUNT(*) FROM issues WHERE organization_id = $1 AND status = 'CITIZEN_VERIFIED') as verified_resolutions,
+         (SELECT COUNT(DISTINCT ward_id) FROM issues WHERE organization_id = $1 AND merged_into_issue_id IS NULL) as active_wards,
+         (SELECT COUNT(*) FROM issues WHERE organization_id = $1 AND is_demo = true) as demo_count`,
+      [orgId]
+    );
+
+    const r = stats[0];
+    const includesDemo = parseInt(r.demo_count, 10) > 0;
+
+    return okResponse({
+      trackable_issues: parseInt(r.trackable_issues, 10),
+      community_reports: parseInt(r.community_reports, 10),
+      verified_resolutions: parseInt(r.verified_resolutions, 10),
+      active_wards: parseInt(r.active_wards, 10),
+      includes_demo_data: includesDemo,
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\public\wards\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { query } from '@/lib/db';
+import { config } from '@/lib/config';
+import { okResponse, errorResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(req: NextRequest) {
+  try {
+    const { rows: orgRows } = await query<{ id: string }>(
+      'SELECT id FROM organizations WHERE slug = $1',
+      [config.defaultOrgSlug]
+    );
+
+    if (orgRows.length === 0) {
+      return okResponse([]);
+    }
+
+    const { rows: wards } = await query<{ id: string; name: string }>(
+      'SELECT id, name FROM wards WHERE organization_id = $1 ORDER BY name ASC',
+      [orgRows[0].id]
+    );
+
+    return okResponse(wards);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\worker\issues\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireRole } from '@/lib/auth';
+import { query } from '@/lib/db';
+import { errorResponse, okResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(req: NextRequest) {
+  try {
+    const user = await requireRole(req, ['WORKER']);
+    const { rows } = await query(
+      `SELECT i.id, i.title, i.status, i.priority_band, i.priority_score, i.assigned_at,
+              cat.name as category_name, w.name as ward_name
+       FROM issues i
+       JOIN categories cat ON cat.id = i.category_id
+       JOIN wards w ON w.id = i.ward_id
+       WHERE i.assigned_worker_id = $1 AND i.organization_id = $2
+         AND i.status IN ('ASSIGNED', 'IN_PROGRESS', 'RESOLVED', 'REOPENED')
+       ORDER BY i.priority_score DESC, i.assigned_at ASC`,
+      [user.id, user.organization_id]
+    );
+
+    return okResponse({ issues: rows });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\worker\issues\[id]\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireRole } from '@/lib/auth';
+import { query } from '@/lib/db';
+import { errorResponse, okResponse } from '@/lib/http';
+import { notFound } from '@/lib/errors';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const user = await requireRole(req, ['WORKER']);
+    const { rows } = await query(
+      `SELECT i.id, i.title, i.summary, i.status, i.priority_band, i.priority_score,
+              i.lat, i.lng, i.assigned_at, cat.name as category_name, w.name as ward_name
+       FROM issues i
+       JOIN categories cat ON cat.id = i.category_id
+       JOIN wards w ON w.id = i.ward_id
+       WHERE i.id = $1 AND i.assigned_worker_id = $2 AND i.organization_id = $3`,
+      [params.id, user.id, user.organization_id]
+    );
+
+    if (rows.length === 0) {
+      throw notFound('Assigned task not found.');
+    }
+
+    return okResponse({ issue: rows[0] });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\worker\issues\[id]\note\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireRole } from '@/lib/auth';
+import { withTransaction } from '@/lib/db';
+import { addWorkerNote } from '@/services/resolutionService';
+import { errorResponse, okResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const user = await requireRole(req, ['WORKER']);
+    const body = await req.json();
+    const { note } = body;
+
+    await withTransaction(async (client) => {
+      await addWorkerNote(client, params.id, user.id, note);
+    });
+
+    return okResponse({ message: 'Note recorded successfully' });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\worker\issues\[id]\resolve\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireRole } from '@/lib/auth';
+import { withTransaction } from '@/lib/db';
+import { resolveIssue } from '@/services/resolutionService';
+import { errorResponse, okResponse } from '@/lib/http';
+import { parseAndValidateUploads } from '@/lib/uploads';
+
+export const dynamic = 'force-dynamic';
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const user = await requireRole(req, ['WORKER']);
+    const formData = await req.formData();
+    const summary = formData.get('summary') as string;
+    const internalNotes = formData.get('internal_notes') as string | null;
+    const rawFiles = formData.getAll('proof_files') as File[];
+
+    const validatedFiles = await parseAndValidateUploads(rawFiles);
+
+    const result = await withTransaction(async (client) => {
+      return await resolveIssue(client, {
+        issueId: params.id,
+        workerId: user.id,
+        summary,
+        internalNotes: internalNotes || undefined,
+        proofFiles: validatedFiles,
+      });
+    });
+
+    return okResponse(result);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+=================================================
+FILE: C:\Users\harsh\Desktop\mu\anant hackerthon project (2)\anant hackerthon project\backend\src\app\api\worker\issues\[id]\start\route.ts
+=================================================
+import { NextRequest } from 'next/server';
+import { requireRole } from '@/lib/auth';
+import { withTransaction } from '@/lib/db';
+import { startWork } from '@/services/resolutionService';
+import { errorResponse, okResponse } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const user = await requireRole(req, ['WORKER']);
+    await withTransaction(async (client) => {
+      await startWork(client, params.id, user.id);
+    });
+
+    return okResponse({ message: 'Work started successfully' });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}

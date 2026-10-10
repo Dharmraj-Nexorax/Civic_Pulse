@@ -1,0 +1,159 @@
+-- 003_workflow_tables.sql
+CREATE SEQUENCE complaint_no_seq START 1;
+
+CREATE TABLE issues (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  organization_id uuid NOT NULL REFERENCES organizations(id),
+  ward_id uuid NOT NULL REFERENCES wards(id),
+  category_id uuid NOT NULL REFERENCES categories(id),
+  status issue_status NOT NULL DEFAULT 'REPORTED',
+  title text NOT NULL,
+  summary text,
+  summary_source text CHECK (summary_source IN ('ai','fallback')),
+  lat double precision NOT NULL,
+  lng double precision NOT NULL,
+  primary_complaint_id uuid,
+  -- priority inputs & result (§8.1)
+  severity severity_level NOT NULL DEFAULT 'SMALL_LOCAL',
+  severity_reviewed boolean NOT NULL DEFAULT false,
+  context context_level NOT NULL DEFAULT 'NORMAL',
+  affected_override integer CHECK (affected_override IS NULL OR affected_override >= 1),
+  priority_score smallint NOT NULL DEFAULT 0 CHECK (priority_score BETWEEN 0 AND 100),
+  priority_band priority_band NOT NULL DEFAULT 'LOW',
+  priority_breakdown jsonb NOT NULL DEFAULT '{}'::jsonb,
+  priority_override_band priority_band,
+  priority_override_reason text,
+  verification_flags jsonb NOT NULL DEFAULT '[]'::jsonb,
+  -- assignment snapshot
+  assigned_team_id uuid REFERENCES teams(id),
+  assigned_worker_id uuid REFERENCES users(id),
+  assigned_at timestamptz,
+  started_at timestamptz,
+  resolved_at timestamptz,
+  verified_at timestamptz,
+  reopened_count integer NOT NULL DEFAULT 0,
+  approved_external_delay_hours numeric(8,2) NOT NULL DEFAULT 0 CHECK (approved_external_delay_hours >= 0),
+  merged_into_issue_id uuid REFERENCES issues(id),
+  is_demo boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (priority_override_band IS NULL OR priority_override_reason IS NOT NULL)
+);
+
+CREATE TABLE complaints (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  complaint_no bigint NOT NULL DEFAULT nextval('complaint_no_seq') UNIQUE,
+  organization_id uuid NOT NULL REFERENCES organizations(id),
+  issue_id uuid NOT NULL REFERENCES issues(id),
+  citizen_id uuid NOT NULL REFERENCES users(id),
+  ward_id uuid NOT NULL REFERENCES wards(id),
+  category_id uuid NOT NULL REFERENCES categories(id),
+  description text NOT NULL CHECK (length(btrim(description)) >= 10),
+  lat double precision NOT NULL CHECK (lat BETWEEN -90 AND 90),
+  lng double precision NOT NULL CHECK (lng BETWEEN -180 AND 180),
+  is_primary boolean NOT NULL DEFAULT false,
+  joined_existing boolean NOT NULL DEFAULT false,
+  is_demo boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE issues ADD CONSTRAINT issues_primary_complaint_fk
+  FOREIGN KEY (primary_complaint_id) REFERENCES complaints(id) DEFERRABLE INITIALLY DEFERRED;
+
+CREATE TABLE media (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  organization_id uuid NOT NULL REFERENCES organizations(id),
+  uploader_id uuid NOT NULL REFERENCES users(id),
+  kind media_kind NOT NULL,
+  complaint_id uuid REFERENCES complaints(id),
+  issue_id uuid REFERENCES issues(id),
+  resolution_id uuid,
+  storage_path text NOT NULL,
+  mime text NOT NULL,
+  size_bytes bigint NOT NULL,
+  original_name text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK ((kind='COMPLAINT' AND complaint_id IS NOT NULL) OR (kind='RESOLUTION_PROOF' AND issue_id IS NOT NULL))
+);
+
+CREATE TABLE assignments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  issue_id uuid NOT NULL REFERENCES issues(id),
+  team_id uuid NOT NULL REFERENCES teams(id),
+  worker_id uuid NOT NULL REFERENCES users(id),
+  assigned_by uuid NOT NULL REFERENCES users(id),
+  assigned_at timestamptz NOT NULL DEFAULT now(),
+  accepted_at timestamptz,
+  band_at_assignment priority_band NOT NULL,
+  expected_hours integer NOT NULL,
+  start_was_timely boolean,
+  ended_at timestamptz,
+  ended_reason text CHECK (ended_reason IN ('RESOLVED','REASSIGNED')),
+  reassign_reason text
+);
+
+CREATE TABLE resolutions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  issue_id uuid NOT NULL REFERENCES issues(id),
+  assignment_id uuid NOT NULL REFERENCES assignments(id),
+  worker_id uuid NOT NULL REFERENCES users(id),
+  resolved_by_role actor_role NOT NULL CHECK (resolved_by_role IN ('WORKER','ADMIN')),
+  note text NOT NULL,
+  ai_draft_used boolean NOT NULL DEFAULT false,
+  proof_count integer NOT NULL DEFAULT 0,
+  resolved_at timestamptz NOT NULL DEFAULT now(),
+  elapsed_hours numeric(10,2) NOT NULL,
+  external_delay_hours numeric(10,2) NOT NULL DEFAULT 0,
+  effective_hours numeric(10,2) NOT NULL,
+  expected_hours integer NOT NULL,
+  on_time boolean NOT NULL,
+  citizen_decision citizen_decision NOT NULL DEFAULT 'PENDING',
+  decided_at timestamptz,
+  reject_reason text,
+  CHECK (citizen_decision <> 'REJECTED' OR reject_reason IS NOT NULL)
+);
+ALTER TABLE media ADD CONSTRAINT media_resolution_fk FOREIGN KEY (resolution_id) REFERENCES resolutions(id);
+
+CREATE TABLE ratings (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  resolution_id uuid NOT NULL UNIQUE REFERENCES resolutions(id),
+  issue_id uuid NOT NULL REFERENCES issues(id),
+  citizen_id uuid NOT NULL REFERENCES users(id),
+  worker_id uuid NOT NULL REFERENCES users(id),
+  stars smallint NOT NULL CHECK (stars BETWEEN 1 AND 5),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE issue_events (
+  id bigserial PRIMARY KEY,
+  issue_id uuid NOT NULL REFERENCES issues(id),
+  actor_id uuid REFERENCES users(id),
+  actor_role actor_role NOT NULL,
+  event_type text NOT NULL,
+  from_status issue_status,
+  to_status issue_status,
+  note text,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE notifications (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id),
+  issue_id uuid REFERENCES issues(id),
+  type text NOT NULL,
+  message text NOT NULL,
+  is_read boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE ai_suggestions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  organization_id uuid NOT NULL REFERENCES organizations(id),
+  kind text NOT NULL CHECK (kind IN ('CATEGORY','SIMILAR_ISSUE','SUMMARY','STATUS_EXPLAIN','COPILOT','RESOLUTION_REPORT','ADMIN_INSIGHT')),
+  method text NOT NULL,
+  complaint_id uuid REFERENCES complaints(id),
+  issue_id uuid REFERENCES issues(id),
+  payload jsonb NOT NULL,
+  accepted boolean,
+  created_at timestamptz NOT NULL DEFAULT now()
+);

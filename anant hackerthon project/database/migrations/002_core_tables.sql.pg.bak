@@ -1,0 +1,64 @@
+-- 002_core_tables.sql
+CREATE TABLE organizations (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  slug text UNIQUE NOT NULL,
+  name text NOT NULL,
+  type org_type NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE wards (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  organization_id uuid NOT NULL REFERENCES organizations(id),
+  name text NOT NULL,
+  center_lat double precision NOT NULL,
+  center_lng double precision NOT NULL,
+  radius_m integer,
+  UNIQUE (organization_id, name)
+);
+
+CREATE TABLE teams (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  organization_id uuid NOT NULL REFERENCES organizations(id),
+  name text NOT NULL,
+  is_active boolean NOT NULL DEFAULT true,
+  UNIQUE (organization_id, name)
+);
+
+CREATE TABLE categories (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  organization_id uuid NOT NULL REFERENCES organizations(id),
+  key text NOT NULL,
+  name text NOT NULL,
+  category_score smallint NOT NULL CHECK (category_score BETWEEN 0 AND 20),
+  default_team_id uuid REFERENCES teams(id),
+  keywords text[] NOT NULL DEFAULT '{}',
+  is_active boolean NOT NULL DEFAULT true,
+  UNIQUE (organization_id, key)
+);
+
+CREATE TABLE users (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  organization_id uuid NOT NULL REFERENCES organizations(id),
+  role user_role NOT NULL,
+  full_name text NOT NULL,
+  mobile text,
+  email text,
+  password_hash text NOT NULL,
+  ward_id uuid REFERENCES wards(id),
+  team_id uuid REFERENCES teams(id),
+  is_active boolean NOT NULL DEFAULT true,
+  is_demo boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (mobile IS NOT NULL OR email IS NOT NULL),
+  CHECK (role <> 'WORKER' OR team_id IS NOT NULL)
+);
+CREATE UNIQUE INDEX users_org_mobile_uq ON users (organization_id, mobile) WHERE mobile IS NOT NULL;
+CREATE UNIQUE INDEX users_org_email_uq  ON users (organization_id, email)  WHERE email  IS NOT NULL;
+
+CREATE TABLE org_settings (
+  organization_id uuid NOT NULL REFERENCES organizations(id),
+  key text NOT NULL,
+  value jsonb NOT NULL,
+  PRIMARY KEY (organization_id, key)
+);

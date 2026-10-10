@@ -1,0 +1,35 @@
+{
+  "name": "civicpulse-backend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3001",
+    "build": "next build",
+    "start": "next start -p 3001",
+    "migrate": "tsx scripts/migrate.ts",
+    "seed": "tsx scripts/seed.ts",
+    "seed:demo": "tsx scripts/seed-demo.ts",
+    "test": "node --test --import tsx src/domain/tests/domain.test.ts",
+    "test:auth": "tsx scripts/test-demo-auth.ts",
+    "smoke": "tsx scripts/e2e-smoke.ts"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "jose": "^5.2.3",
+    "mysql2": "^3.24.5",
+    "next": "^14.2.15",
+    "pg": "^8.11.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^20.12.7",
+    "@types/pg": "^8.11.5",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "tsx": "^4.7.2",
+    "typescript": "^5.4.5"
+  }
+}
